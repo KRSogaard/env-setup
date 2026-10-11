@@ -1,0 +1,292 @@
+#!/bin/bash
+set -euo pipefail
+
+# gwt — git worktree wrapper
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+DIM='\033[2m'
+NC='\033[0m'
+
+die() { echo -e "${RED}$1${NC}" >&2; exit 1; }
+
+ensure_repo() {
+    git rev-parse --show-toplevel 2>/dev/null || die "Not in a git repository"
+}
+
+repo_name() { basename "$(ensure_repo)"; }
+
+main_branch() {
+    git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null \
+        | sed 's@^refs/remotes/origin/@@' \
+        || echo "main"
+}
+
+main_worktree() {
+    git worktree list --porcelain | head -1 | sed 's/^worktree //'
+}
+
+# Directory name for a branch. Slashes would otherwise nest the worktree
+# ("kasper/damage-waivers" → .../backend-wts/kasper/damage-waivers), so
+# they are flattened to dashes. The branch itself keeps its real name.
+worktree_dirname() { printf '%s\n' "${1//\//-}"; }
+
+# ── Interactive arrow-key picker (no fzf needed) ─────────────────────
+
+# tput writes to stdout, which inside $(pick …) would end up glued to the
+# selected value, so every cursor command is sent to the terminal via
+# stderr instead. Failures (no TERM, no tty) are cosmetic — never fatal.
+term() { tput "$@" >&2 2>/dev/null || true; }
+
+pick() {
+    local prompt="$1"; shift
+    local opts=("$@")
+    local sel=0 n=${#opts[@]}
+
+    [[ $n -eq 0 ]] && { echo -e "${YELLOW}Nothing to select${NC}" >&2; return 1; }
+
+    term civis
+    trap 'term cnorm' EXIT INT TERM
+
+    echo -e "\n${BOLD}${prompt}${NC}  ${DIM}(↑/↓ select · enter confirm · q cancel)${NC}\n" >&2
+
+    while true; do
+        for i in "${!opts[@]}"; do
+            if [[ $i -eq $sel ]]; then
+                echo -e "  ${CYAN}❯ ${opts[$i]}${NC}" >&2
+            else
+                echo -e "    ${DIM}${opts[$i]}${NC}" >&2
+            fi
+        done
+
+        IFS= read -rsn1 key
+        if [[ "$key" == $'\x1b' ]]; then
+            read -rsn2 key
+            case "$key" in
+                '[A') ((sel > 0))     && ((sel--)) ;;
+                '[B') ((sel < n - 1)) && ((sel++)) ;;
+            esac
+        elif [[ "$key" == "" ]]; then
+            break
+        elif [[ "$key" == "q" ]]; then
+            term cnorm
+            echo -e "\n${DIM}Cancelled${NC}" >&2
+            return 1
+        fi
+
+        term cuu "$n"
+    done
+
+    term cnorm
+    echo "${opts[$sel]}"
+}
+
+# ── Commands ──────────────────────────────────────────────────────────
+
+cmd_list() { git worktree list; }
+
+cmd_add() {
+    local branch="${1:-}"
+    [[ -z "$branch" ]] && die "Usage: gwt add <branch-name>"
+
+    local root main_br parent wts_dir wt_dir
+    root=$(ensure_repo)
+    main_br=$(main_branch)
+    parent=$(dirname "$root")
+    wts_dir="${parent}/$(repo_name)-wts"
+    wt_dir="${wts_dir}/$(worktree_dirname "$branch")"
+
+    record_path() {
+        mkdir -p "$HOME/.cache"
+        printf '%s\n' "$wt_dir" > "$HOME/.cache/gwt-last-path"
+    }
+
+    if existing=$(git worktree list --porcelain | awk -v b="$branch" '
+        /^worktree / { p=$2 }
+        /^branch refs\/heads\// { sub("refs/heads/", "", $2); if ($2 == b) { print p; exit } }
+    '); [[ -n "$existing" ]]; then
+        echo -e "${YELLOW}Worktree for '${branch}' already exists at ${existing}${NC}"
+        wt_dir="$existing"
+        record_path
+        return 0
+    fi
+
+    if [[ -e "$wt_dir" ]]; then
+        die "Path already exists: $wt_dir"
+    fi
+
+    echo -e "${BLUE}Fetching from origin…${NC}"
+    git fetch origin --prune 2>&1 | tail -1 || true
+
+    mkdir -p "$wts_dir"
+
+    if git show-ref --verify --quiet "refs/heads/$branch"; then
+        echo -e "${BLUE}Worktree from existing local branch '${branch}'…${NC}"
+        git worktree add "$wt_dir" "$branch"
+    elif git show-ref --verify --quiet "refs/remotes/origin/$branch"; then
+        echo -e "${BLUE}Worktree from remote branch '${branch}'…${NC}"
+        git worktree add --track -b "$branch" "$wt_dir" "origin/$branch"
+    else
+        echo -e "${BLUE}New branch '${branch}' from '${main_br}'…${NC}"
+        git worktree add -b "$branch" "$wt_dir" "origin/$main_br"
+    fi
+
+    record_path
+    echo -e "${GREEN}✓ Worktree created at ${wt_dir}${NC}"
+}
+
+# ── Worktree inventory ────────────────────────────────────────────────
+# Fills the parallel arrays WT_PATHS / WT_LABELS / WT_STALE with every
+# worktree except the main one. Read from --porcelain so paths with
+# spaces survive and stale registrations are flagged.
+#
+# A worktree is stale when git can no longer find its checkout — the
+# directory was deleted by hand, or its .git file is gone. `git worktree
+# remove` refuses to touch those (fatal: validation failed), so they are
+# unregistered with `git worktree prune` instead.
+collect_worktrees() {
+    WT_PATHS=(); WT_LABELS=(); WT_STALE=()
+
+    local main_wt
+    main_wt=$(main_worktree)
+
+    local path="" branch="" stale="no"
+
+    append_worktree() {
+        if [[ -z "$path" || "$path" == "$main_wt" ]]; then
+            return 0
+        fi
+
+        local label="$path"
+        if [[ -n "$branch" ]]; then
+            label="${label}  [${branch}]"
+        fi
+        if [[ "$stale" == "yes" ]]; then
+            label="${label}  (stale)"
+        fi
+
+        WT_PATHS+=("$path")
+        WT_LABELS+=("$label")
+        WT_STALE+=("$stale")
+    }
+
+    local line
+    while IFS= read -r line; do
+        case "$line" in
+            "worktree "*) append_worktree; path="${line#worktree }"; branch=""; stale="no" ;;
+            "branch "*)   branch="${line#branch refs/heads/}" ;;
+            "detached")   branch="detached HEAD" ;;
+            "prunable"*)  stale="yes" ;;
+        esac
+    done < <(git worktree list --porcelain)
+    append_worktree
+}
+
+# Removes one worktree. Stale registrations are only unregistered — the
+# checkout is already gone, and any leftover directory is left alone and
+# reported so it can be deleted by hand.
+drop_worktree() {
+    local path="$1" stale="$2"
+
+    if [[ "$stale" == "yes" ]]; then
+        git worktree prune
+        if [[ -e "$path" ]]; then
+            echo -e "  ${YELLOW}stale reference dropped — directory still on disk: ${path}${NC}"
+        else
+            echo -e "  ${DIM}stale reference dropped${NC}"
+        fi
+        return 0
+    fi
+
+    git worktree remove --force "$path"
+}
+
+cmd_remove() {
+    collect_worktrees
+
+    if [[ ${#WT_PATHS[@]} -eq 0 ]]; then
+        echo -e "${YELLOW}No additional worktrees${NC}"
+        return 0
+    fi
+
+    local chosen
+    chosen=$(pick "Select worktree to remove:" "${WT_LABELS[@]}") || return 0
+
+    local index=-1 i
+    for i in "${!WT_LABELS[@]}"; do
+        if [[ "${WT_LABELS[$i]}" == "$chosen" ]]; then
+            index=$i
+            break
+        fi
+    done
+
+    if [[ $index -lt 0 ]]; then
+        die "Could not match selection: $chosen"
+    fi
+
+    echo -e "\n${RED}Removing${NC} ${WT_PATHS[$index]}"
+    if drop_worktree "${WT_PATHS[$index]}" "${WT_STALE[$index]}"; then
+        echo -e "${GREEN}✓ Removed${NC}"
+    else
+        die "Failed to remove ${WT_PATHS[$index]}"
+    fi
+}
+
+cmd_prune() {
+    collect_worktrees
+
+    if [[ ${#WT_PATHS[@]} -eq 0 ]]; then
+        echo -e "${YELLOW}No additional worktrees to prune${NC}"
+        return 0
+    fi
+
+    echo -e "${RED}${BOLD}Removing ${#WT_PATHS[@]} worktree(s):${NC}"
+
+    local failed=()
+    local i
+    for i in "${!WT_PATHS[@]}"; do
+        echo -e "  ${DIM}removing ${WT_PATHS[$i]}…${NC}"
+        if ! drop_worktree "${WT_PATHS[$i]}" "${WT_STALE[$i]}"; then
+            echo -e "  ${RED}could not remove ${WT_PATHS[$i]}${NC}"
+            failed+=("${WT_PATHS[$i]}")
+        fi
+    done
+
+    git worktree prune
+
+    if [[ ${#failed[@]} -gt 0 ]]; then
+        echo -e "${RED}✗ ${#failed[@]} worktree(s) left behind:${NC}"
+        local path
+        for path in "${failed[@]}"; do
+            echo -e "  ${RED}${path}${NC}"
+        done
+        return 1
+    fi
+
+    echo -e "${GREEN}✓ All worktrees removed${NC}"
+}
+
+# ── Usage ─────────────────────────────────────────────────────────────
+
+usage() {
+    echo -e "${BOLD}gwt${NC} — git worktree wrapper\n"
+    echo -e "  ${BOLD}gwt ls${NC}              List all worktrees"
+    echo -e "  ${BOLD}gwt a|add${NC} <branch>  Create worktree (fetches main first)"
+    echo -e "  ${BOLD}gwt r|remove${NC}        Interactively select & remove a worktree"
+    echo -e "  ${BOLD}gwt p|prune${NC}         Remove all worktrees"
+}
+
+# ── Dispatch ──────────────────────────────────────────────────────────
+
+case "${1:-}" in
+    ls)             cmd_list ;;
+    a|add)          cmd_add "${2:-}" ;;
+    r|remove)       cmd_remove ;;
+    p|prune)        cmd_prune ;;
+    -h|--help|"")   usage ;;
+    *)              die "Unknown command: $1" ;;
+esac

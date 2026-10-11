@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Apply profile colouring to a tmux session based on its name.
+#
+# Sets session-scoped user options only. ~/.tmux.conf references them as
+# #{@p_accent} / #{@p_label}, which tmux resolves at render time by walking
+# pane -> window -> session -> global, so one set here recolours the status
+# bar, the active window tab, the pane border and the message line.
+#
+# Called by the session-created hook and by `prefix r`. Safe to run by hand:
+#   tmux-profile-style            # styles every work/personal session
+#   tmux-profile-style work       # styles just that one
+set -u
+
+style_one() {
+  local s="$1" profile accent label
+  case "$s" in
+    work)     profile=work;     accent="#89b4fa"; label="🏢 WORK" ;;
+    personal) profile=personal; accent="#a6e3a1"; label="🏠 PERSONAL" ;;
+    *) return 0 ;;
+  esac
+  tmux set-option -t "$s" @dev_profile "$profile"
+  tmux set-option -t "$s" @p_accent    "$accent"
+  tmux set-option -t "$s" @p_label     "$label"
+}
+
+if [ "$#" -gt 0 ] && [ -n "${1:-}" ]; then
+  style_one "$1"
+else
+  # No argument: style every session we recognise.
+  tmux list-sessions -F '#{session_name}' 2>/dev/null | while IFS= read -r s; do
+    style_one "$s"
+  done
+fi

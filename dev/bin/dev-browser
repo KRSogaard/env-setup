@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# $BROWSER inside dev sessions. This box is reached over SSH, so there is no
+# browser to open — print the URL boldly instead, so it is click/copyable from
+# the laptop terminal. Used by `claude /login` and anything else calling $BROWSER.
+url="$1"
+printf '\n\033[1;36m┌─ open this on your laptop ─────────────────────────────┐\033[0m\n'
+printf '\033[1;37m%s\033[0m\n' "$url"
+printf '\033[1;36m└────────────────────────────────────────────────────────┘\033[0m\n\n'
+# Also stash it, in case the terminal mangles a long URL on wrap.
+printf '%s\n' "$url" > "${XDG_RUNTIME_DIR:-/tmp}/dev-browser-last-url"

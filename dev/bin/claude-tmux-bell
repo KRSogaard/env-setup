@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Ring the bell on this pane's tmux window so another window's tab lights up
+# when Claude finishes a turn or needs input. Wired as a Stop/Notification hook.
+[ -n "$TMUX" ] || exit 0
+pane="${TMUX_PANE:-}"
+if [ -n "$pane" ]; then
+  win=$(tmux display-message -p -t "$pane" '#{session_name}:#{window_index}' 2>/dev/null) || exit 0
+  # Only ring if the user is looking at a different window.
+  active=$(tmux display-message -p -t "$pane" '#{window_active}' 2>/dev/null)
+  [ "$active" = "1" ] && exit 0
+  tmux set-window-option -t "$win" monitor-bell on 2>/dev/null
+fi
+printf '\a' > /dev/tty 2>/dev/null || printf '\a'
+exit 0

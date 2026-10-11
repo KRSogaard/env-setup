@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Print the Claude profile badge based on the account actually logged in,
+# not on what DEV_PROFILE claims. Usable as a statusLine command or in tmux.
+cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+json="$cfg/.claude.json"
+[ -f "$json" ] || json="$HOME/.claude.json"
+email=$(python3 - "$json" <<'PY' 2>/dev/null
+import json,sys
+try:
+    d=json.load(open(sys.argv[1]))
+    print((d.get("oauthAccount") or {}).get("emailAddress",""))
+except Exception:
+    print("")
+PY
+)
+case "$email" in
+  *@magicdoor.com) echo "🏢 WORK" ;;
+  *@sogaard.us)    echo "🏠 PERSONAL" ;;
+  "")              echo "⚪ NOT LOGGED IN" ;;
+  *)               echo "❔ ${email}" ;;
+esac

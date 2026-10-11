@@ -6,6 +6,8 @@
 # =============================================================================
 
 set -e
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/lib/common.sh"
 
 echo "========================================="
 echo "🏗️  Arch Linux Setup Script"
@@ -100,14 +102,11 @@ echo "⚙️  Configuration"
 echo "========================================="
 echo ""
 
-read -p "💻 Is this a laptop? Install power management tools? (y/N): " INSTALL_POWER_MGMT
-INSTALL_POWER_MGMT=${INSTALL_POWER_MGMT:-n}
-
-read -p "🐍 Do you have Razer peripherals? Install OpenRazer + Polychromatic? (y/N): " INSTALL_RAZER
-INSTALL_RAZER=${INSTALL_RAZER:-n}
-
-read -p "🎨 Install KDE Plasma customization tools? (y/N): " INSTALL_KDE_RICE
-INSTALL_KDE_RICE=${INSTALL_KDE_RICE:-n}
+# Answers are remembered in ~/.config/env-setup/arch.env and offered as the
+# default next time (used as-is when there is no terminal).
+ask_saved arch INSTALL_POWER_MGMT "💻 Is this a laptop? Install power management tools?"
+ask_saved arch INSTALL_RAZER "🐍 Do you have Razer peripherals? Install OpenRazer + Polychromatic?"
+ask_saved arch INSTALL_KDE_RICE "🎨 Install KDE Plasma customization tools?"
 
 echo ""
 
@@ -138,40 +137,22 @@ echo ""
 
 FAILLOCK_CONF="/etc/security/faillock.conf"
 
-# Check if faillock is already configured with our settings
-if grep -q "^deny = 10" "$FAILLOCK_CONF" 2>/dev/null && \
-   grep -q "^unlock_time = 60" "$FAILLOCK_CONF" 2>/dev/null; then
-    echo "   ✅ Faillock already configured"
-else
-    echo "🔧 Configuring lenient faillock settings..."
-    
-    # Update deny setting
-    if grep -q "^# deny" "$FAILLOCK_CONF" 2>/dev/null; then
-        sudo sed -i 's/^# deny.*/deny = 10/' "$FAILLOCK_CONF"
-    elif ! grep -q "^deny" "$FAILLOCK_CONF" 2>/dev/null; then
-        echo "deny = 10" | sudo tee -a "$FAILLOCK_CONF" > /dev/null
+# Each key is set whether it is missing, commented out or set to another value.
+set_faillock() {
+    local key="$1" value="$2"
+    if grep -qE "^$key = $value\$" "$FAILLOCK_CONF" 2>/dev/null; then
+        echo "   ✅ $key = $value"
+    elif grep -qE "^#? *$key *=" "$FAILLOCK_CONF" 2>/dev/null; then
+        sudo sed -i -E "s/^#? *$key *=.*/$key = $value/" "$FAILLOCK_CONF"
+        echo "   - $key = $value"
+    else
+        echo "$key = $value" | sudo tee -a "$FAILLOCK_CONF" > /dev/null
+        echo "   - $key = $value"
     fi
-    
-    # Update unlock_time setting
-    if grep -q "^# unlock_time" "$FAILLOCK_CONF" 2>/dev/null; then
-        sudo sed -i 's/^# unlock_time.*/unlock_time = 60/' "$FAILLOCK_CONF"
-    elif ! grep -q "^unlock_time" "$FAILLOCK_CONF" 2>/dev/null; then
-        echo "unlock_time = 60" | sudo tee -a "$FAILLOCK_CONF" > /dev/null
-    fi
-    
-    # Update fail_interval setting
-    if grep -q "^# fail_interval" "$FAILLOCK_CONF" 2>/dev/null; then
-        sudo sed -i 's/^# fail_interval.*/fail_interval = 900/' "$FAILLOCK_CONF"
-    elif ! grep -q "^fail_interval" "$FAILLOCK_CONF" 2>/dev/null; then
-        echo "fail_interval = 900" | sudo tee -a "$FAILLOCK_CONF" > /dev/null
-    fi
-    
-    echo "   ✅ Faillock configured:"
-    echo "      - deny = 10 (allow 10 failed attempts)"
-    echo "      - unlock_time = 60 (auto-unlock after 60 seconds)"
-    echo "      - fail_interval = 900 (reset counter after 15 min)"
-fi
-
+}
+set_faillock deny 10            # allow 10 failed attempts
+set_faillock unlock_time 60     # auto-unlock after 60 seconds
+set_faillock fail_interval 900  # reset the counter after 15 min
 echo ""
 
 # -----------------------------------------------------------------------------
@@ -196,6 +177,10 @@ else
 fi
 
 echo ""
+echo "🔄 Updating AUR packages (pacman -Syu above only covers the repos)..."
+paru -Sua --noconfirm --quiet || echo "   ⚠️  AUR update failed — continuing"
+
+echo ""
 
 # -----------------------------------------------------------------------------
 # Proton Pass
@@ -216,50 +201,14 @@ echo ""
 # -----------------------------------------------------------------------------
 
 echo "========================================="
-echo "🐚 Setting up Zsh & Oh My Zsh"
+echo "🐚 Installing Zsh & plugins"
 echo "========================================="
 echo ""
 
-echo "📦 Installing Zsh and plugins..."
-install_packages zsh zsh-autosuggestions zsh-syntax-highlighting fzf
+echo "📦 Installing Zsh plugins (zsh itself comes with the dev profiles step)..."
+install_packages zsh-autosuggestions zsh-syntax-highlighting fzf
 
-echo ""
-echo "🔧 Setting Zsh as default shell..."
-if [[ "$SHELL" != "$(which zsh)" ]]; then
-    chsh -s $(which zsh)
-    echo "   Changed default shell to zsh"
-else
-    echo "   ✅ Zsh is already the default shell"
-fi
-
-echo ""
-echo "✨ Installing Oh My Zsh..."
-if [ ! -d "$HOME/.oh-my-zsh" ]; then
-    RUNZSH=no sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"
-else
-    echo "   ✅ Oh My Zsh is already installed"
-fi
-
-echo ""
-echo "⚙️  Configuring .zshrc..."
-cat > ~/.zshrc << 'EOF'
-export ZSH="$HOME/.oh-my-zsh"
-ZSH_THEME="af-magic"
-plugins=(git fzf)
-source $ZSH/oh-my-zsh.sh
-
-# Zsh plugins
-source /usr/share/zsh/plugins/zsh-autosuggestions/zsh-autosuggestions.zsh
-source /usr/share/zsh/plugins/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
-
-# Aliases
-alias ds="dotnet script"
-alias de="dotnet ef"
-alias sshOpenClaw="ssh kasper@192.168.10.5"
-alias sshDesktop="ssh kasper@192.168.0.3"
-EOF
-echo "   ✅ .zshrc configured"
-
+echo "   ℹ️  Login shell, Oh My Zsh and ~/.zshrc are set up by the dev profiles step below"
 echo ""
 echo "✅ Zsh setup completed!"
 echo ""
@@ -268,70 +217,9 @@ echo ""
 # Git Setup
 # -----------------------------------------------------------------------------
 
-echo "========================================="
-echo "🔧 Setting up Git"
-echo "========================================="
+install_packages git github-cli
 echo ""
-
-echo "📦 Installing Git..."
-install_packages git
-
-echo ""
-echo "⚙️  Configuring Git..."
-
-# Only set if not already set
-if [[ "$(git config --global credential.helper)" != "store" ]]; then
-    git config --global credential.helper store
-    echo "   - Credential helper: store"
-else
-    echo "   ✅ Credential helper already configured"
-fi
-
-if [[ "$(git config --global user.name)" != "Kasper Sogaard" ]]; then
-    git config --global user.name "Kasper Sogaard"
-    echo "   - Username: Kasper Sogaard"
-else
-    echo "   ✅ Username already configured"
-fi
-
-if [[ "$(git config --global user.email)" != "kasper@sogaard.us" ]]; then
-    git config --global user.email "kasper@sogaard.us"
-    echo "   - Email: kasper@sogaard.us"
-else
-    echo "   ✅ Email already configured"
-fi
-
-if [[ "$(git config --global push.autoSetupRemote)" != "true" ]]; then
-    git config --global push.autoSetupRemote true
-    echo "   - Auto push new branches: enabled"
-else
-    echo "   ✅ Auto push already configured"
-fi
-
-if [[ "$(git config --global init.defaultBranch)" != "master" ]]; then
-    git config --global init.defaultBranch master
-    echo "   - Default branch: master"
-else
-    echo "   ✅ Default branch already configured"
-fi
-
-echo ""
-echo "🔑 Setting up GitHub credentials..."
-if ! grep -q "github.com" ~/.git-credentials 2>/dev/null; then
-    read -sp "   Enter your GitHub Personal Access Token (PAT): " GITHUB_PAT
-    echo ""
-    if [ -n "$GITHUB_PAT" ]; then
-        echo "https://KRSogaard:${GITHUB_PAT}@github.com" >> ~/.git-credentials
-        chmod 600 ~/.git-credentials
-        echo "   ✅ GitHub PAT stored in ~/.git-credentials"
-    else
-        echo "   ⚠️  No token entered, skipping"
-    fi
-else
-    echo "   ✅ GitHub credentials already stored"
-fi
-
-echo ""
+setup_git
 echo "✅ Git setup completed!"
 echo ""
 
@@ -349,11 +237,19 @@ install_packages brave-bin google-chrome
 
 echo ""
 echo "💻 Installing development tools..."
-install_packages rider visual-studio-code-bin dbeaver opencode-bin claude-code
+install_packages rider visual-studio-code-bin dbeaver opencode-bin
+
+# Claude Code comes from its native installer (dev profiles step), which keeps
+# itself updated. The AUR package would shadow it on PATH, so it goes.
+if is_installed claude-code; then
+    sudo pacman -Rns --noconfirm claude-code
+    echo "   ✅ Removed AUR claude-code (the native install replaces it)"
+fi
 
 echo ""
 echo "🔧 Installing CLI tools..."
-install_packages github-cli aws-cli-v2 tmux jq pandoc texlive-core
+# tmux, jq, node, mosh, zsh: installed by the dev profiles step.
+install_packages aws-cli-v2 pandoc texlive-core
 
 echo ""
 echo "🎮 Installing gaming and media..."
@@ -389,7 +285,7 @@ echo "========================================="
 echo ""
 
 echo "📦 Installing Docker Engine and NVIDIA Container Toolkit..."
-install_pacman_packages docker docker-compose nvidia-container-toolkit
+install_pacman_packages docker docker-compose nvidia-container-toolkit jq   # jq: daemon.json edits below
 
 echo ""
 echo "🔧 Enabling Docker service..."
@@ -418,6 +314,20 @@ if ! grep -q "nvidia" /etc/docker/daemon.json 2>/dev/null; then
     echo "   ✅ NVIDIA runtime configured"
 else
     echo "   ✅ NVIDIA runtime already configured"
+fi
+
+echo ""
+echo "🔒 Binding published container ports to localhost..."
+# Docker writes its own firewall rules, so `-p 8080:80` would be reachable
+# from the network even with ufw denying incoming. With "ip" set, ports bind
+# to 127.0.0.1 unless a run asks for more (`-p 0.0.0.0:8080:80`).
+if [ "$(sudo jq -r '.ip // empty' /etc/docker/daemon.json 2>/dev/null)" = "127.0.0.1" ]; then
+    echo "   ✅ Published ports already default to 127.0.0.1"
+else
+    DAEMON_JSON="$(sudo cat /etc/docker/daemon.json 2>/dev/null || echo '{}')"
+    echo "$DAEMON_JSON" | jq '.ip = "127.0.0.1"' | sudo tee /etc/docker/daemon.json > /dev/null
+    sudo systemctl restart docker
+    echo "   ✅ Published ports default to 127.0.0.1 (docker restarted)"
 fi
 
 echo ""
@@ -463,6 +373,18 @@ else
 fi
 
 echo ""
+echo "📡 Allowing mosh (UDP 60000-61000)..."
+if sudo ufw status | grep -q "60000:61000/udp"; then
+    echo "   ✅ mosh already allowed"
+else
+    sudo ufw allow 60000:61000/udp comment mosh
+    echo "   ✅ mosh allowed"
+fi
+
+echo ""
+harden_sshd
+
+echo ""
 echo "✅ SSH setup completed!"
 echo ""
 
@@ -488,12 +410,8 @@ else
     echo "   ✅ dotnet-ef already installed"
 fi
 
-if ! dotnet_tool_installed "dotnet-script"; then
-    #dotnet tool install --global dotnet-script
-    echo "   ✅ dotnet-script installed"
-else
-    echo "   ✅ dotnet-script already installed"
-fi
+# dotnet-script is not installed automatically (the `ds` alias expects it):
+#   dotnet tool install --global dotnet-script
 
 echo ""
 echo "✅ .NET Development setup completed!"
@@ -513,7 +431,7 @@ install_packages python python-pip python-virtualenv
 
 echo ""
 echo "📦 Setting up Node.js development environment..."
-install_packages nodejs npm pnpm
+install_packages npm pnpm   # nodejs comes with the dev profiles step
 
 echo ""
 echo "☕ Installing Java OpenJDK..."
@@ -544,11 +462,9 @@ echo "✅ Folder structure ready!"
 echo ""
 
 # -----------------------------------------------------------------------------
-# Dev Profiles (tmux + Claude Code work/personal)
-# Runs after the Zsh section, which rewrites ~/.zshrc from scratch.
+# Dev Profiles (zsh, tmux, Claude Code work/personal, secrets)
 # -----------------------------------------------------------------------------
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 bash "$SCRIPT_DIR/dev/install-linux.sh"
 
 # -----------------------------------------------------------------------------

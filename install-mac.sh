@@ -6,6 +6,8 @@
 # =============================================================================
 
 set -e
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/lib/common.sh"
 
 echo "========================================="
 echo "🏗️  macOS Setup Script"
@@ -115,19 +117,32 @@ echo "🍺 Installing Homebrew"
 echo "========================================="
 echo ""
 
+# Installed but not on PATH yet (fresh shell, Apple Silicon): load it first,
+# so it is not installed a second time.
+for brew_bin in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+    if ! command -v brew &> /dev/null && [ -x "$brew_bin" ]; then
+        eval "$("$brew_bin" shellenv)"
+    fi
+done
+
 if ! command -v brew &> /dev/null; then
     echo "🔧 Installing Homebrew..."
     /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-
-    # Add brew to PATH for Apple Silicon
-    if [[ "$(uname -m)" == "arm64" ]]; then
-        echo 'eval "$(/opt/homebrew/bin/brew shellenv)"' >> ~/.zprofile
-        eval "$(/opt/homebrew/bin/brew shellenv)"
-    fi
+    eval "$(/opt/homebrew/bin/brew shellenv 2>/dev/null || /usr/local/bin/brew shellenv)"
     echo "   ✅ Homebrew installed"
 else
     echo "   ✅ Homebrew already installed"
 fi
+# Login shells get brew from ~/.zprofile; interactive ones also via base.zsh.
+if [[ "$(uname -m)" == "arm64" ]] && ! grep -qF '/opt/homebrew/bin/brew shellenv' ~/.zprofile 2>/dev/null; then
+    echo 'eval "$(/opt/homebrew/bin/brew shellenv)"' >> ~/.zprofile
+    echo "   ✅ Added brew shellenv to ~/.zprofile"
+fi
+
+echo ""
+echo "🔄 Updating Homebrew and upgrading installed packages..."
+brew update --quiet || echo "   ⚠️  brew update failed — continuing"
+brew upgrade || echo "   ⚠️  brew upgrade failed — continuing"
 
 echo ""
 
@@ -162,108 +177,16 @@ echo ""
 # Zsh & Oh My Zsh
 # -----------------------------------------------------------------------------
 
-echo "========================================="
-echo "🐚 Setting up Oh My Zsh"
-echo "========================================="
-echo ""
-
-echo "   ✅ Zsh is the default shell on macOS"
-
-echo ""
-echo "✨ Installing Oh My Zsh..."
-if [ ! -d "$HOME/.oh-my-zsh" ]; then
-    RUNZSH=no sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"
-else
-    echo "   ✅ Oh My Zsh is already installed"
-fi
-
-# Check if .zshrc needs updating
-EXPECTED_THEME='ZSH_THEME="af-magic"'
-if ! grep -q "$EXPECTED_THEME" ~/.zshrc 2>/dev/null; then
-    echo ""
-    echo "⚙️  Configuring .zshrc with minimal config..."
-    cat > ~/.zshrc << 'EOF'
-export ZSH="$HOME/.oh-my-zsh"
-export PATH="$PATH:$HOME/.dotnet/tools"
-eval "$(/opt/homebrew/bin/brew shellenv)" 2>/dev/null || true
-ZSH_THEME="af-magic"
-plugins=(git)
-source $ZSH/oh-my-zsh.sh
-alias ds="dotnet script"
-alias de="dotnet ef"
-EOF
-    echo "   ✅ .zshrc configured"
-else
-    echo "   ✅ .zshrc already configured"
-fi
-
-echo ""
-echo "✅ Zsh setup completed!"
+echo "🐚 Zsh, Oh My Zsh and ~/.zshrc are set up by the dev profiles step below"
 echo ""
 
 # -----------------------------------------------------------------------------
 # Git Setup
 # -----------------------------------------------------------------------------
 
-echo "========================================="
-echo "🔧 Setting up Git"
-echo "========================================="
+install_formulas gh
 echo ""
-
-echo "⚙️  Configuring Git..."
-
-if [[ "$(git config --global credential.helper)" != "store" ]]; then
-    git config --global credential.helper store
-    echo "   - Credential helper: store"
-else
-    echo "   ✅ Credential helper already configured"
-fi
-
-if [[ "$(git config --global user.name)" != "Kasper Sogaard" ]]; then
-    git config --global user.name "Kasper Sogaard"
-    echo "   - Username: Kasper Sogaard"
-else
-    echo "   ✅ Username already configured"
-fi
-
-if [[ "$(git config --global user.email)" != "kasper@sogaard.us" ]]; then
-    git config --global user.email "kasper@sogaard.us"
-    echo "   - Email: kasper@sogaard.us"
-else
-    echo "   ✅ Email already configured"
-fi
-
-if [[ "$(git config --global push.autoSetupRemote)" != "true" ]]; then
-    git config --global push.autoSetupRemote true
-    echo "   - Auto push new branches: enabled"
-else
-    echo "   ✅ Auto push already configured"
-fi
-
-if [[ "$(git config --global init.defaultBranch)" != "master" ]]; then
-    git config --global init.defaultBranch master
-    echo "   - Default branch: master"
-else
-    echo "   ✅ Default branch already configured"
-fi
-
-echo ""
-echo "🔑 Setting up GitHub credentials..."
-if ! grep -q "github.com" ~/.git-credentials 2>/dev/null; then
-    read -sp "   Enter your GitHub Personal Access Token (PAT): " GITHUB_PAT
-    echo ""
-    if [ -n "$GITHUB_PAT" ]; then
-        echo "https://KRSogaard:${GITHUB_PAT}@github.com" >> ~/.git-credentials
-        chmod 600 ~/.git-credentials
-        echo "   ✅ GitHub PAT stored in ~/.git-credentials"
-    else
-        echo "   ⚠️  No token entered, skipping"
-    fi
-else
-    echo "   ✅ GitHub credentials already stored"
-fi
-
-echo ""
+setup_git
 echo "✅ Git setup completed!"
 echo ""
 
@@ -285,7 +208,8 @@ install_casks jetbrains-rider visual-studio-code dbeaver-community
 
 echo ""
 echo "🔧 Installing CLI tools..."
-install_formulas gh awscli tmux jq pandoc fastfetch ollama
+# tmux, jq, node, mosh: installed by the dev profiles step.
+install_formulas awscli pandoc fastfetch ollama
 
 echo ""
 echo "📄 Installing MacTeX (includes XeLaTeX for Pandoc)..."
@@ -333,9 +257,9 @@ echo "✅ Docker Desktop installed!"
 echo ""
 
 echo "🌐 Setting up Open WebUI (web interface for Ollama)..."
-if ! docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^open-webui$"; then
-    echo "   ℹ️  Make sure Docker Desktop is running before continuing."
-    read -p "   Press Enter when Docker Desktop is ready..."
+if ! docker info &>/dev/null; then
+    echo "   ⚠️  Docker Desktop is not running — skipping. Start it and re-run to add Open WebUI."
+elif ! docker ps -a --format '{{.Names}}' | grep -q "^open-webui$"; then
     docker run -d -p 5300:8080 --add-host=host.docker.internal:host-gateway --name open-webui --restart always ghcr.io/open-webui/open-webui:main
     echo "   ✅ Open WebUI running at http://localhost:5300"
 else
@@ -434,12 +358,8 @@ else
     echo "   ✅ dotnet-ef already installed"
 fi
 
-if ! dotnet_tool_installed "dotnet-script"; then
-    #dotnet tool install --global dotnet-script
-    echo "   ✅ dotnet-script installed"
-else
-    echo "   ✅ dotnet-script already installed"
-fi
+# dotnet-script is not installed automatically (the `ds` alias expects it):
+#   dotnet tool install --global dotnet-script
 
 echo ""
 echo "✅ .NET Development setup completed!"
@@ -459,7 +379,7 @@ install_formulas python
 
 echo ""
 echo "📦 Setting up Node.js development environment..."
-install_formulas node pnpm
+install_formulas pnpm   # node comes with the dev profiles step
 
 echo ""
 echo "☕ Installing Java OpenJDK..."
@@ -470,10 +390,9 @@ echo "✅ Development environments setup completed!"
 echo ""
 
 # -----------------------------------------------------------------------------
-# Dev Profiles (tmux + Claude Code work/personal)
+# Dev Profiles (zsh, tmux, Claude Code work/personal, secrets)
 # -----------------------------------------------------------------------------
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 bash "$SCRIPT_DIR/dev/install-mac.sh"
 
 # -----------------------------------------------------------------------------
@@ -542,12 +461,17 @@ echo "🔒 Screen Recording Permissions"
 echo "========================================="
 echo ""
 
-echo "   macOS requires you to manually grant Screen Recording permission."
-echo "   Please enable it for: Slack, Brave, Chrome, and Zoom."
-echo ""
-echo "   Opening Screen Recording settings..."
-open "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
-read -p "   Press Enter when you've enabled Screen Recording for all apps..."
+# Manual, so it is asked only until confirmed once on this Mac.
+grant_screen_recording() {
+    [ -t 0 ] || { echo "   ⚠️  No terminal — asking next run"; return 1; }
+    echo "   macOS requires you to manually grant Screen Recording permission."
+    echo "   Please enable it for: Slack, Brave, Chrome, and Zoom."
+    echo ""
+    echo "   Opening Screen Recording settings..."
+    open "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+    read -r -p "   Press Enter when you've enabled Screen Recording for all apps..."
+}
+once screen-recording grant_screen_recording || true
 
 echo ""
 echo "✅ Screen recording permissions configured!"
@@ -583,6 +507,6 @@ echo ""
 echo "Notes:"
 echo "  - Open Docker Desktop from Applications to complete Docker setup"
 echo "  - Open Magnet from Applications and grant Accessibility permissions"
-echo "  - Open KeepingYouAwake from the menu bar to keep your Mac awake"
+echo "  - Open Caffeine from the menu bar to keep your Mac awake"
 echo "  - You may need to restart your terminal for all changes to take effect"
 echo ""

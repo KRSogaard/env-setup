@@ -21,7 +21,7 @@ fi
 echo "📦 Installing packages..."
 # tmux, jq (settings merge), node (claude-hud status line). python3 ships
 # with the Xcode Command Line Tools.
-for formula in tmux jq node; do
+for formula in tmux jq node mosh zsh-autosuggestions zsh-syntax-highlighting; do
     if brew list "$formula" &>/dev/null; then
         echo "   ✅ $formula already installed"
     else

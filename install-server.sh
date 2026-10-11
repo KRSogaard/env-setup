@@ -8,6 +8,8 @@
 # =============================================================================
 
 set -e
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/lib/common.sh"
 
 echo "========================================="
 echo "  Remote Server Setup Script"
@@ -56,15 +58,6 @@ pkg_install() {
     esac
 }
 
-pkg_installed() {
-    case "$DISTRO" in
-        debian) dpkg -l "$1" 2>/dev/null | grep -q "^ii" ;;
-        arch)   pacman -Qi "$1" &>/dev/null ;;
-    esac
-}
-
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-
 # -----------------------------------------------------------------------------
 # System Update & Essentials
 # -----------------------------------------------------------------------------
@@ -81,13 +74,17 @@ case "$DISTRO" in
         echo ""
         echo "Installing essentials..."
         pkg_install git curl wget unzip build-essential
+        # gh is in Ubuntu 22.04+ / Debian 12+; older releases need GitHub's apt repo.
+        pkg_install gh || echo "   ⚠️  gh not available from apt — GitHub auth will be skipped"
         ;;
     arch)
-        echo "Updating package database..."
-        sudo pacman -Sy --noconfirm
+        # Full upgrade: -Sy followed by an install is a partial upgrade,
+        # which Arch does not support.
+        echo "Updating system..."
+        sudo pacman -Syu --noconfirm
         echo ""
         echo "Installing essentials..."
-        pkg_install git curl wget unzip base-devel
+        pkg_install git curl wget unzip base-devel github-cli
         ;;
 esac
 
@@ -99,68 +96,19 @@ echo ""
 # Git Setup
 # -----------------------------------------------------------------------------
 
-echo "========================================="
-echo "  Setting up Git"
-echo "========================================="
-echo ""
-
-if [[ "$(git config --global credential.helper)" != "store" ]]; then
-    git config --global credential.helper store
-    echo "   - Credential helper: store"
-else
-    echo "   Credential helper already configured"
-fi
-
-if [[ "$(git config --global user.name)" != "Kasper Sogaard" ]]; then
-    git config --global user.name "Kasper Sogaard"
-    echo "   - Username: Kasper Sogaard"
-else
-    echo "   Username already configured"
-fi
-
-if [[ "$(git config --global user.email)" != "kasper@sogaard.us" ]]; then
-    git config --global user.email "kasper@sogaard.us"
-    echo "   - Email: kasper@sogaard.us"
-else
-    echo "   Email already configured"
-fi
-
-if [[ "$(git config --global push.autoSetupRemote)" != "true" ]]; then
-    git config --global push.autoSetupRemote true
-    echo "   - Auto push new branches: enabled"
-else
-    echo "   Auto push already configured"
-fi
-
-if [[ "$(git config --global init.defaultBranch)" != "master" ]]; then
-    git config --global init.defaultBranch master
-    echo "   - Default branch: master"
-else
-    echo "   Default branch already configured"
-fi
-
-echo ""
-echo "Setting up GitHub credentials..."
-if ! grep -q "github.com" ~/.git-credentials 2>/dev/null; then
-    read -sp "   Enter your GitHub Personal Access Token (PAT): " GITHUB_PAT
-    echo ""
-    if [ -n "$GITHUB_PAT" ]; then
-        echo "https://KRSogaard:${GITHUB_PAT}@github.com" >> ~/.git-credentials
-        chmod 600 ~/.git-credentials
-        echo "   GitHub PAT stored"
-    else
-        echo "   No token entered, skipping"
-    fi
-else
-    echo "   GitHub credentials already stored"
-fi
-
-echo ""
+setup_git
 echo "Git setup completed"
 echo ""
 
 # -----------------------------------------------------------------------------
-# Dev Profiles (tmux + Claude Code work/personal)
+# SSH
+# -----------------------------------------------------------------------------
+
+harden_sshd
+echo ""
+
+# -----------------------------------------------------------------------------
+# Dev Profiles (zsh, tmux, Claude Code work/personal, secrets)
 # -----------------------------------------------------------------------------
 
 bash "$SCRIPT_DIR/dev/install-linux.sh"

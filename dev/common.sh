@@ -7,55 +7,62 @@
 # =============================================================================
 
 DEV_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-STAMP="$(date +%s)"
+source "$DEV_DIR/../lib/common.sh"
 ZSH_BLOCK="$HOME/.config/zsh/dev-profiles.zsh"
 SOURCE_LINE='[ -f "$HOME/.config/zsh/dev-profiles.zsh" ] && source "$HOME/.config/zsh/dev-profiles.zsh"'
 
-# Copy $1 to $2, backing up $2 first if it exists and differs.
-deploy_file() {
-    local src="$1" dst="$2" mode="$3"
-    # A symlink (e.g. ~/.local/bin/gwt from the old personal-tools repo) is
-    # replaced by a real copy rather than followed.
-    if [ -L "$dst" ]; then
-        rm "$dst"
-        echo "   🔗 Removed symlink ${dst/#$HOME/\~}"
-    fi
-    if [ -f "$dst" ] && cmp -s "$src" "$dst"; then
-        echo "   ✅ ${dst/#$HOME/\~} up to date"
-        return
-    fi
-    if [ -f "$dst" ]; then
-        cp "$dst" "$dst.bak.$STAMP"
-        echo "   📦 Backed up ${dst/#$HOME/\~} -> ${dst/#$HOME/\~}.bak.$STAMP"
-    fi
-    mkdir -p "$(dirname "$dst")"
-    cp "$src" "$dst"
-    [ -n "$mode" ] && chmod "$mode" "$dst"
-    echo "   ✅ ${dst/#$HOME/\~} updated"
-}
-
-# Claude Code's native installer; skipped when claude is already on PATH.
+# Claude Code's native installer (~/.local/bin/claude), which updates itself
+# from then on. A claude from a package manager does not count.
 install_claude_code() {
-    if command -v claude &>/dev/null; then
-        echo "   ✅ Claude Code already installed ($(command -v claude))"
+    if [ -x "$HOME/.local/bin/claude" ]; then
+        echo "   ✅ Claude Code already installed (native, ~/.local/bin/claude)"
     else
-        curl -fsSL https://claude.ai/install.sh | bash
-        echo "   ✅ Claude Code installed"
+        # The AUR package's /usr/bin/claude exports DISABLE_UPDATES=1, which
+        # leaks into anything run from such a session and blocks this installer.
+        curl -fsSL https://claude.ai/install.sh | env -u DISABLE_UPDATES -u DISABLE_INSTALLATION_CHECKS bash
+        if [ -x "$HOME/.local/bin/claude" ]; then
+            echo "   ✅ Claude Code installed (native)"
+        else
+            echo "   ⚠️  Native Claude Code install failed — re-run to retry"
+        fi
     fi
 }
 
+# Every script in bin/ goes to ~/.local/bin. Scripts deployed by an earlier
+# run but since removed from the repo are deleted, so old machines converge.
 deploy_helper_scripts() {
     echo ""
     echo "🔧 Installing helper scripts to ~/.local/bin..."
+    local manifest="$ENV_SETUP_STATE/bin.manifest" script name
+    local current=()
     for script in "$DEV_DIR"/bin/*; do
-        deploy_file "$script" "$HOME/.local/bin/$(basename "$script")" 755
+        name="$(basename "$script")"
+        current+=("$name")
+        deploy_file "$script" "$HOME/.local/bin/$name" 755
     done
+    if [ -f "$manifest" ]; then
+        while IFS= read -r name; do
+            [ -z "$name" ] && continue
+            printf '%s\n' "${current[@]}" | grep -qxF "$name" && continue
+            if [ -e "$HOME/.local/bin/$name" ]; then
+                rm -f "$HOME/.local/bin/$name"
+                echo "   🗑️  Removed ~/.local/bin/$name (no longer in the repo)"
+            fi
+        done < "$manifest"
+    fi
+    mkdir -p "$ENV_SETUP_STATE"
+    printf '%s\n' "${current[@]}" > "$manifest"
 }
 
+# A running tmux server keeps the config it started with, so reload it.
 deploy_tmux() {
     echo ""
     echo "🖥️  Installing tmux config..."
     deploy_file "$DEV_DIR/tmux.conf" "$HOME/.tmux.conf"
+    if [ "$DEPLOY_CHANGED" = 1 ] && tmux info &>/dev/null; then
+        tmux source-file "$HOME/.tmux.conf" && "$HOME/.local/bin/tmux-profile-style" || true
+        echo "   🔄 Reloaded the running tmux server"
+    fi
 }
 
 # The block lives in its own file; ~/.zshrc only gets one source line.
@@ -63,12 +70,18 @@ deploy_tmux() {
 # that line, so nothing is defined twice.
 deploy_zsh() {
     echo ""
+    echo "🐚 Zsh: login shell, Oh My Zsh, base config..."
+    set_login_shell_zsh
+    install_oh_my_zsh
+    deploy_zsh_base
+
+    echo ""
     echo "🐚 Installing zsh dev-profiles block..."
     deploy_file "$DEV_DIR/dev-profiles.zsh" "$ZSH_BLOCK"
 
     touch ~/.zshrc
     if grep -q '^# dev profiles: work / personal' ~/.zshrc; then
-        cp ~/.zshrc ~/.zshrc.bak.$STAMP
+        backup_file ~/.zshrc
         python3 - "$HOME/.zshrc" "$SOURCE_LINE" <<'PY'
 import sys
 path, source_line = sys.argv[1], sys.argv[2]
@@ -88,7 +101,7 @@ PY
     # gwt used to come from the personal-tools repo; its wrapper now lives in
     # dev-profiles.zsh.
     if grep -q '^source ".*personal-tools/gwt/gwt.sh"$' ~/.zshrc; then
-        cp ~/.zshrc ~/.zshrc.bak.$STAMP
+        backup_file ~/.zshrc
         sed -i.tmp '/^source ".*personal-tools\/gwt\/gwt.sh"$/d' ~/.zshrc && rm -f ~/.zshrc.tmp
         echo "   ✅ Removed personal-tools gwt source line from ~/.zshrc (backup: ~/.zshrc.bak.$STAMP)"
     fi
@@ -102,33 +115,44 @@ PY
 }
 
 # Repo values win for every key claude-settings.json defines; keys only the
-# local file has (theme, autoMode, modelSettings, ...) are kept.
+# local file has (theme, autoMode, modelSettings, ...) are kept. A copy of what
+# was deployed is kept in ~/.local/share/env-setup, so a key the repo has since
+# dropped (an old plugin, a hook) is removed instead of lingering forever.
 deploy_claude_settings() {
     echo ""
     echo "⚙️  Configuring Claude Code settings..."
-    local node_bin rendered cfg target merged
+    local node_bin rendered cfg target merged last
     node_bin="$(command -v node || echo node)"
     rendered="$(mktemp)"
     sed -e "s#__HOME__#$HOME#g" -e "s#__NODE__#$node_bin#g" "$DEV_DIR/claude-settings.json" > "$rendered"
 
     for cfg in "$HOME/.claude" "$HOME/.claude-personal"; do
         target="$cfg/settings.json"
-        mkdir -p "$cfg"
+        last="$ENV_SETUP_STATE/claude-settings$(basename "$cfg").json"
+        mkdir -p "$cfg" "$ENV_SETUP_STATE"
         if [ ! -f "$target" ]; then
             cp "$rendered" "$target"
+            cp "$rendered" "$last"
             echo "   ✅ ${target/#$HOME/\~} created"
             continue
         fi
+        [ -f "$last" ] || echo '{}' > "$last"
         merged="$(mktemp)"
-        jq -s '.[0] * .[1]' "$target" "$rendered" > "$merged"
+        jq -s '
+          .[0] as $cur | .[1] as $last | .[2] as $new
+          | [ $last | paths
+              | select(. as $p | ($new | try getpath($p) catch null) == null) ] as $dropped
+          | ($cur | delpaths($dropped)) * $new
+        ' "$target" "$last" "$rendered" > "$merged"
         if cmp -s <(jq -S . "$target") <(jq -S . "$merged"); then
             echo "   ✅ ${target/#$HOME/\~} up to date"
             rm -f "$merged"
         else
-            cp "$target" "$target.bak.$STAMP"
+            backup_file "$target"
             mv "$merged" "$target"
             echo "   ✅ ${target/#$HOME/\~} updated (backup: settings.json.bak.$STAMP)"
         fi
+        cp "$rendered" "$last"
     done
     rm -f "$rendered"
 }

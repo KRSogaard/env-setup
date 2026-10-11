@@ -12,14 +12,26 @@ the VPN; now deployable anywhere from this folder.
 exec zsh
 ```
 
-Both install tmux, jq, node and Claude Code if missing, then run the shared
-steps in `common.sh`. Re-run either one after pulling to update: every
-changed file is backed up as `*.bak.<epoch>` before it is replaced.
+Both install zsh, tmux, jq, node, mosh and Claude Code (native installer,
+which updates itself) if missing, then run the
+shared steps in `common.sh`. Re-run either one after pulling to update: the
+machine converges to the repo, whatever older version it had. Every changed
+file is backed up as `*.bak.<epoch>` before it is replaced.
 
-- The zsh setup lives in `~/.config/zsh/dev-profiles.zsh`. `~/.zshrc` only gets
-  one `source` line; an older inline copy of the block is moved out of it.
-- `settings.json` (both profiles): keys defined in `claude-settings.json` are
-  set to the repo value; keys only you have (theme, autoMode, ...) are kept.
+- **zsh:** zsh becomes the login shell and Oh My Zsh is installed. The repo's
+  config lives in `~/.config/zsh/base.zsh` (first line of `~/.zshrc`) and
+  `~/.config/zsh/dev-profiles.zsh`; `~/.zshrc` only gets their `source` lines,
+  so lines other tools add to it are kept. Copies of those lines that older
+  installers wrote inline are removed.
+- **`settings.json`** (both profiles): keys defined in `claude-settings.json`
+  are set to the repo value; keys only you have (theme, autoMode, ...) are
+  kept. A key that an earlier run deployed and the repo has since dropped (a
+  plugin, a hook) is removed.
+- **`bin/`:** a script removed from the repo is removed from `~/.local/bin`.
+- **tmux:** a running tmux server is reloaded when `tmux.conf` changes.
+
+What the last run deployed is kept in `~/.local/share/env-setup/`, which is
+how dropped keys and scripts are found.
 
 ## Secrets
 
@@ -63,6 +75,8 @@ Unlike macOS there is no Keychain: credentials live in `.credentials.json`
 |------------------------------|--------------------------------------|------------------------------------------------------|
 | `install-linux.sh` / `install-mac.sh` | —                           | entry points: platform packages, then `common.sh`    |
 | `common.sh`                  | —                                    | shared, idempotent deploy steps                      |
+| `../lib/common.sh`           | —                                    | helpers shared with the top-level installers         |
+| `../shell/base.zsh`          | `~/.config/zsh/base.zsh`             | Oh My Zsh, PATH, aliases (sourced first from `~/.zshrc`) |
 | `dev-profiles.zsh`           | `~/.config/zsh/dev-profiles.zsh`     | profile derivation, `claude` wrappers, `dev-*` (sourced from `~/.zshrc`) |
 | `tmux.conf`                  | `~/.tmux.conf`                       | extended keys, true colour, profile-coloured bar     |
 | `claude-settings.json`       | `~/.claude/` + `~/.claude-personal/` `settings.json` | bypass permissions, model/effort, fullscreen TUI, bell hooks, claude-hud status line, plugins |
@@ -117,7 +131,8 @@ Plugins enabled in both, with their marketplaces registered in
 
 - **No permission prompts.** The wrappers pass `--dangerously-skip-permissions`
   and both settings files use `defaultMode: bypassPermissions`.
-- **API key stripped.** `secrets.zsh` (env-setup-secrets) exports a live `ANTHROPIC_API_KEY`. The
+- **API key stripped.** `secrets.zsh` no longer exports `ANTHROPIC_API_KEY`
+  (only `with-anthropic-key <cmd>` passes it on). As a second guard, the
   `claude` / `claude-work` / `claude-personal` wrappers launch via
   `env -u ANTHROPIC_API_KEY`, so the Max subscription is always billed.
 - **Folder guard.** Launching the work account under `~/workspaces/personal`
